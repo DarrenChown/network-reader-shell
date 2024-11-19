@@ -15,8 +15,8 @@ import os
 import pypsa
 import numpy as np
 import dash
-from dash import dcc, html
-from dash.dependencies import Input, Output
+from dash import dcc, html, dash_table
+from dash.dependencies import Input, Output, State
 import plotly.graph_objs as go
 import threading as th
 import webbrowser as wb
@@ -25,6 +25,9 @@ from pathlib import Path
 # Global Variables
 loaded_network = None
 compare_network = None
+hidden = {'display': 'none'}
+visible = {'display': 'block'}
+
 
 Default_Folder = ""
 ROOT_DIRECTORY = Path(__file__).parent
@@ -38,13 +41,14 @@ loading_options = [{'label': 'Loading...', 'value': 'loading'}]
 The Following Configure the Host and Run the App
 
 _____________________________________________'''
-app = dash.Dash(__name__)
+app = dash.Dash(__name__, external_stylesheets=[
+    "https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&display=swap"
+])
 def run_dash(): 
     app.run(port=5000,  debug=False)
 def open_app(defaultFolder):
     global Default_Folder
     Default_Folder = Path(defaultFolder)
-    # print(f"NETWORK_FOLDER set to: {NETWORK_FOLDER}")
     app.layout['folder-dropdown'].value = Default_Folder.name
     dash_thread = th.Thread(target=run_dash, daemon=True)
     dash_thread.start()
@@ -79,61 +83,77 @@ def list_saved_networks(network_folder):
 
 
 class NetworkData:
-    def __init__(self, network):
-        self.network = network
+    def __init__(self):
+        # Dictionary to hold multiple networks
+        self.networks = {}
 
-    '''     Converts the Network File to a Global Network Variable 
+    '''     Load and store multiple networks by filename 
     ___________________________________________________________________'''
     def load_network(self, network_folder, network_filename):
         try:
+            # Initialize a new PyPSA Network and load data
             network = pypsa.Network()
             network_path = os.path.join(network_folder, network_filename)
             network.import_from_hdf5(network_path)
-            self.network = network
-            return network
+            
+            # Store the network in the dictionary with the filename as the key
+            self.networks[network_filename] = network
+            print(f"Network '{network_filename}' loaded successfully.")
         except FileNotFoundError:
             print(f"Error: The network file '{network_filename}' does not exist in '{network_folder}'.")
-            return None
+            self.networks[network_filename] = None
         except Exception as e:
             print(f"An error occurred while loading the network: {e}")
-            return None
+            self.networks[network_filename] = None
 
+    '''     Get a specific network by filename
+    ___________________________________________________________________'''
+    def get_network(self, network_filename):
+        # Return the network object if it exists, otherwise return None
+        return self.networks.get(network_filename)
 
-
-
-    '''     Get the Static Data Components
-    ___________________________________________'''
-    def get_all_static_data(self, component):
-        if self.network:
-            component_data = getattr(self.network, self.network.components[component]['list_name'], None)
-            component_data = component_data.reset_index()  # Convert index to a column
+    '''     Get static data from a specific network by component
+    ___________________________________________________________________'''
+    def get_all_static_data(self, network_filename, component):
+        network = self.get_network(network_filename)
+        if network:
+            component_data = getattr(network, network.components[component]['list_name'], None)
             if isinstance(component_data, pd.DataFrame):
                 sanitized_data = component_data.replace([np.inf, -np.inf, np.nan], None)
-                return sanitized_data
+                return sanitized_data.reset_index()  # Convert index to a column
         return None
 
 
-    def get_varying_attributes(self, component):
-        """Retrieve varying attributes for a specific component."""
-        if self.network:
-            component_data = getattr(self.network, f'{self.network.components[component]["list_name"]}_t', None)
+    def get_varying_attributes(self, network_filename, component):
+        """Retrieve varying attributes for a specific component in a specific network."""
+        network = self.get_network(network_filename)
+        if network and component in network.components:
+            # Access the component's time-varying data
+            component_data = getattr(network, f'{network.components[component]["list_name"]}_t', None)
             if isinstance(component_data, dict):
-                return [{'label': attr, 'value': attr} for attr in component_data.keys()]
+                return list(component_data.keys())  # Return list of keys
             elif isinstance(component_data, pd.DataFrame):
-                return [{'label': attr, 'value': attr} for attr in component_data.columns]
-        return []
+                return list(component_data.columns)  # Return list of DataFrame columns
+        return None  # Return None if no varying attributes found
+
     
 
     '''     Get the Time Series / Varying Data
     _______________________________________________'''
-    def get_varying_data(self, component, attr):
-        if self.network:
-            varying_data = getattr(self.network, f"{self.network.components[component]['list_name']}_t", None)
+    def get_varying_data(self, network_filename, component, attr):
+        """Retrieve time series data for a specific attribute of a component in a specific network."""
+        network = self.get_network(network_filename)
+        if network:
+            varying_data = getattr(network, f"{network.components[component]['list_name']}_t", None)
+            
+            # Case 1: varying_data is a DataFrame
             if isinstance(varying_data, pd.DataFrame):
                 if attr in varying_data.columns:
                     varying_attr_data = varying_data[[attr]].replace([np.inf, -np.inf, np.nan], None)
                     varying_attr_data = varying_attr_data.reset_index()
                     return varying_attr_data
+            
+            # Case 2: varying_data is a dictionary
             elif isinstance(varying_data, dict) and attr in varying_data:
                 attribute_data = varying_data[attr]
                 if isinstance(attribute_data, pd.DataFrame):
@@ -141,6 +161,7 @@ class NetworkData:
                     attribute_data = attribute_data.reset_index()
                     return attribute_data
                 return attribute_data
+
         return None
 
 
@@ -153,227 +174,314 @@ The Following are Dash Functions to Set the Layout and Functionality of the Webp
 
 ________________________________________________________________________________'''
 
+LabelStyle = {
+    'display': 'block', 
+    'textAlign': 'left',
+    'marginRight': '10px',
+    'fontSize': '20px',
+    'fontWeight': 'bold', 
+    'color': '#ffffff', 
+    'fontFamily': 'Roboto, sans-serif'
+}
 
+DropdownStyle={
+    'width': '100%',
+    'marginRight': '10px',
+    'fontFamily': 'Roboto, sans-serif',
+    'fontSize': '15px'
+}
+
+TinyBoxStyle={
+    'flex': '1',
+    'display': 'flex', 
+    'alignItems': 'center',
+    'marginBottom': '10px',
+    'borderRadius': '5px'
+}
+
+DropdownContain={
+    'marginRight': '10px',
+    'borderRadius': '15px',
+    'padding': '15px',
+    'minWidth': '50px', 
+    'maxWidth': '500px', 
+    'flex': '1', 
+    'background': '#296900',
+    'boxShadow': '0px 4px 8px rgba(0, 0, 0, 0.2)'
+}
+
+BigBoxStyle={
+    'marginTop': '10px',
+    'borderRadius': '15px',
+    'padding': '20px',
+    'alignItems': 'center',
+    'display': 'flex',
+    'background': 'linear-gradient(to right, #7ebf5f, #5eb4bf)',
+    'boxShadow': '0px 4px 8px rgba(0, 0, 0, 0.2)'
+}
+
+ButtonStyle={
+    'marginRight': '10px',
+    'width': '100%',
+    'height': '40px',
+    'fontFamily': 'Roboto, sans-serif',
+    'fontSize': '14px',
+    'borderRadius': '5px',
+    'verticalAlign': 'middle',
+    'fontSize': '15px',
+    'cursor': 'pointer'
+}
+
+DoneButtonStyle={
+    'marginTop': '10px',
+    'backgroundColor': '#4CAF50',
+    'color': 'white',
+    'padding': '5px 10px',
+    'border': 'none',
+    'borderRadius': '3px',
+    'cursor': 'pointer'
+}
+
+CheckboxStyle={
+    'position': 'absolute',
+    'top': '40px',
+    'left': '93px',
+    'backgroundColor': 'white',
+    'border': '1px solid #ccc',
+    'borderRadius': '5px',
+    'padding': '10px',
+    'width': '70%',
+    'boxShadow': '0px 4px 8px rgba(0,0,0,0.2)',
+    'zIndex': 10
+
+}
+
+hiddenLabel = {**LabelStyle, 'display': 'none'}
+hiddenDropdown = {**DropdownStyle, 'display': 'none'}
+hiddenDropdownContain = {**DropdownContain, 'display': 'none'}
+hiddenButton = {**ButtonStyle, 'display': 'none'}
+hiddenDoneButton = {**DoneButtonStyle, 'display': 'none'}
+hiddenCheckbox = {**CheckboxStyle, 'display': 'none'}
+
+visibleLabel = {**LabelStyle, 'display': 'block'}
+visibleDropdown = {**DropdownStyle, 'display': 'block'}
+visibleDropdownContain = {**DropdownContain, 'display': 'block'}
+visibleButton = {**ButtonStyle, 'display': 'block'}
+visibleDoneButton = {**DoneButtonStyle, 'display': 'block'}
+visibleCheckbox = {**CheckboxStyle, 'display': 'block'}
+
+hiddenPlot = {'display': 'none', 'width': '0%', 'height': '0%', 'margin-top': '20px'}
+visiblePlot = {'display': 'block', 'width': '100%', 'height': '100%', 'margin-top': '20px'}
 
 
 '''     This is the HTML format for the Dash Webpage
 _________________________________________________________'''
 app.layout = html.Div([
+    dcc.Store(id='hiddenNetworkWindow', data={'is_hidden': True}),
+    dcc.Store(id='hiddenPlotWindow', data={'is_hidden': True}),
     html.Div([
         html.Div([                      # Network Selection
-            html.Label(
-                "Network Folder:", 
-                style={
-                    'display': 'block', 
-                    'textAlign': 'left'
-                }
+            html.Div(
+                children=[
+                    html.Label(
+                        "Folder:", 
+                        style=visibleLabel
+                    ),
+                    dcc.Dropdown(
+                        id='folder-dropdown',
+                        options=[{'label': folder.name, 'value': folder.name} for folder in ROOT_DIRECTORY.iterdir() if folder.is_dir()],
+                        placeholder="Select a folder...",
+                        style=visibleDropdown
+                    )
+                ],
+                style=TinyBoxStyle
             ),
-            dcc.Dropdown(
-                id='folder-dropdown',
-                options=[{'label': folder.name, 'value': folder.name} for folder in ROOT_DIRECTORY.iterdir() if folder.is_dir()],
-                placeholder="Select a folder...",
-                style={'width': '100%'}
-            )
-        ], 
-        style={
-            'flex': '1', 
-            'minWidth': '50px', 
-            'maxWidth': '150px', 
-            'marginRight': '10px'
-            }
-        ),
-        html.Div([                      # Network Selection
-            html.Label(
-                "Network:", 
+            html.Div(
+                [
+                    html.Label(
+                        "Network:", 
+                        style=visibleLabel
+                    ),
+                    html.Button(
+                        "Select Networks...",
+                        id="network-window-toggle",
+                        n_clicks=0,
+                        style=visibleButton
+                    ),
+                    html.Div(
+                        id="network-window",
+                        children=[
+                            dcc.Checklist(
+                                id='network-dropdown',
+                                options=[], 
+                                style={**visibleDropdown, 'maxHeight': '150px', 'overflowY': 'auto'}
+                            ),
+                            html.Button(
+                                "Done",
+                                id="network-done",
+                                n_clicks=0,
+                                style=visibleDoneButton
+                            )
+                        ],
+                        style=hiddenCheckbox
+                    ),
+                ], 
                 style={
-                    'display': 'block', 
-                    'textAlign': 'left'
+                    'display': 'flex',       # Use flexbox for horizontal alignment
+                    'alignItems': 'center',   # Center items vertically
+                    'position': 'relative'    # Ensure absolute positioning of custom dropdown works
                 }
-            ),
-            dcc.Dropdown(
-                id='network-dropdown',
-                options=[], 
-                placeholder="Select a network...",
-                style={'width': '100%'}
             )
-        ], 
-        style={
-            'flex': '1', 
-            'minWidth': '50px', 
-            'maxWidth': '150px', 
-            'marginRight': '10px'
-            }
+        ],
+        style=visibleDropdownContain
         ),
-        dcc.Loading(                    # Component Selection
-            id="loading-components",
-            type="default",
-            children=[
-                html.Div([
+        html.Div([
+            html.Div(
+                [                
                     html.Label(
                         "Component:", 
                         id='component-label', 
-                        style={
-                            'display': 'none', 
-                            'textAlign': 'left'
-                        }
+                        style=hiddenLabel
                     ),
                     dcc.Dropdown(
                         id='component-dropdown', 
                         placeholder="Select a component...", 
-                        style={
-                            'width': '100%', 
-                            'display': 'none'
-                        }
-                    )
-                ], 
-                style={
-                    'flex': '1', 
-                    'minWidth': '180px', 
-                    'maxWidth': '300px', 
-                    'marginRight': '10px'
-                    }
-                )
-            ]
-        ),
-        html.Div([                      # Data Type Selection (Static / Time Series)
-            html.Label(
-                "Data Type:", 
-                id='datatype-label', 
-                style={
-                    'display': 'none', 
-                    'textAlign': 'left'
-                }
-            ),
-            dcc.Dropdown(
-                id='datatype-dropdown', 
-                options=[
-                    {
-                        'label': 'Static Data', 
-                        'value': 'static'
-                    },
-                    {
-                        'label': 'Varying Data', 
-                        'value': 'varying'
-                    }
+                        style=hiddenDropdown
+                    )                
                 ],
-                value='static',
-                style={
-                    'width': '100%', 
-                    'display': 'none'
-                }
-            )
-        ],
-        style={
-            'flex': '1', 
-            'minWidth': '50px', 
-            'maxWidth': '120px', 
-            'marginRight': '10px'
-            }
-        ),
-        
-        dcc.Loading(                    # Attribute Selection
-            id="loading-attributes",
-            type="default",
-            children=[
-                html.Div([
+                style=TinyBoxStyle
+                
+            ),
+            html.Div(
+                [
                     html.Label(
                         "Attribute:", 
                         id='attribute-label', 
-                        style={
-                            'display': 'none', 
-                            'textAlign': 'left'
-                        }
+                        style=hiddenLabel
                     ),
                     dcc.Dropdown(
                         id='attribute-dropdown', 
                         placeholder="Select an attribute...", 
-                        style={
-                            'width': '100%', 
-                            'display': 'none'
-                        }
+                        style=hiddenDropdown
                     )
-                ], 
-                style={
-                    'flex': '1', 
-                    'minWidth': '100px', 
-                    'maxWidth': '150px', 
-                    'marginRight': '10px'
-                    }
-                )
-            ]
-        ),
-
-        html.Div([                  # Display Type Selection (Table / Plot)
-            html.Label(
-                "Display Type:", 
-                id='displaytype-label', 
-                style={
-                    'display': 'none', 
-                    'textAlign': 'left'
-                }
-            ),
-            dcc.Dropdown(
-                id='displaytype-dropdown', 
-                options=[
-                    {
-                        'label': 'Table', 
-                        'value': 'table'
-                        },
-                    {
-                        'label': 'Plot', 
-                        'value': 'plot'
-                        }
                 ],
-                value='table',
-                style={
-                    'width': '100%', 
-                    'display': 'none'
-                }
+                style=TinyBoxStyle
+            )
+            
+        ], 
+        style=visibleDropdownContain
+        ),
+        html.Div([                      
+            html.Div(
+                [  
+                    html.Label(
+                        "Data Type:", 
+                        id='datatype-label', 
+                        style=hiddenLabel
+                    ),
+                    dcc.Dropdown(
+                        id='datatype-dropdown', 
+                        options=[
+                            {
+                                'label': 'Static Data', 
+                                'value': 'static'
+                            },
+                            {
+                                'label': 'Varying Data', 
+                                'value': 'varying'
+                            }
+                        ],
+                        value='static',
+                        style=hiddenDropdown
+                    )
+                ],
+                style=TinyBoxStyle
+                
+            ),
+            html.Div(
+                [  
+                    html.Label(
+                        "Select Key/s:", 
+                        id='keyselect-label', 
+                        style=hiddenLabel
+                    ),
+                    dcc.Dropdown(
+                        id='keyselect-dropdown', 
+                        placeholder="Select keys...", 
+                        style=hiddenDropdown,
+                        multi=True
+                    )
+                ],
+                style=TinyBoxStyle
+                
             )
         ],
-        style={
-            'flex': '1', 
-            'minWidth': '50px', 
-            'maxWidth': '150px', 
-            'marginRight': '10px'
-            }
+        style=visibleDropdownContain
         ),
+        
 
-        html.Div([                      # Network Compare Selection
-            html.Label(
-                "Compare Network:", 
-                id='networkcompare-label',
-                style={
-                    'display': 'none', 
-                    'textAlign': 'left'
-                }
+        html.Div([                      
+            html.Div(
+                [  
+                    html.Label(
+                        "Tabulate Network:", 
+                        id='tableselect-label', 
+                        style=hiddenLabel
+                    ),
+                    dcc.Dropdown(
+                        id='tableselect-dropdown', 
+                        placeholder="Select network...",
+                        style=hiddenDropdown
+                    )
+                ],
+                style=TinyBoxStyle
+                
             ),
-            dcc.Dropdown(
-                id='networkcompare-dropdown',
-                options=[], 
-                placeholder="Select a network...",
+            html.Div(
+                [
+                    html.Label(
+                        "Plot:", 
+                        id='plotselect-label', 
+                        style=hiddenLabel
+                    ),
+                    html.Button(
+                        "Select Networks to Plot...",
+                        id="plot-window-toggle",
+                        n_clicks=0,
+                        style=hiddenButton
+                    ),
+                    html.Div(
+                        id="plot-window",
+                        children=[
+                            dcc.Checklist(
+                                id='plotselect-dropdown',
+                                options=[], 
+                                style={**visibleDropdown, 'maxHeight': '150px', 'overflowY': 'auto'}
+                            ),
+                            html.Button(
+                                "Done",
+                                id="plot-done",
+                                n_clicks=0,
+                                style=visibleDoneButton
+                            )
+                        ],
+                        style=hiddenCheckbox
+                    )                    
+                ],
                 style={
-                    'width': '100%', 
-                    'display': 'none'
+                    'display': 'flex',       # Use flexbox for horizontal alignment
+                    'alignItems': 'center',   # Center items vertically
+                    'position': 'relative'    # Ensure absolute positioning of custom dropdown works
                 }
+                
+                
             )
-        ], 
-        style={
-            'flex': '1', 
-            'minWidth': '50px', 
-            'maxWidth': '150px', 
-            'marginRight': '10px'
-            }
-        )
+        ],
+        style=visibleDropdownContain
+        ),       
     ],
-    style={
-        'display': 'flex', 
-        'alignItems': 'flex-start', 
-        'marginTop': '10px'
-        }
+    style=BigBoxStyle
     ),
-
-    # html.Br(),
 
     dcc.Loading(
         id="loading-output",
@@ -420,44 +528,28 @@ The Following are Callbacks that Dash Uses to Dynamically Change the Webpage bas
 
 ______________________________________________________________________________________________________________________'''
 
-loaded_network_data = NetworkData(None)
-compare_network_data = NetworkData(None)
+network_data = NetworkData()
+
+
 
 '''     Adds a list of Networks based on the Selected Folder
 _________________________________________________________________'''
 @app.callback(
-    Output('network-dropdown', 'options'),
-    Input('folder-dropdown', 'value')
+    [
+        Output('network-dropdown', 'options'),
+        Output('plotselect-dropdown', 'options')
+    ],
+    [
+        Input('folder-dropdown', 'value')
+    ]    
 )
 def update_network_dropdown(selected_folder):
     if selected_folder is None:
-        return []
-    global NETWORK_FOLDER
-    NETWORK_FOLDER = ROOT_DIRECTORY / selected_folder
-    network_files = [f.name for f in NETWORK_FOLDER.iterdir() if f.suffix == '.h5']
-    return [{'label': net, 'value': net} for net in network_files]
-
-
-@app.callback(
-    [Output('networkcompare-dropdown', 'style'),
-     Output('networkcompare-label', 'style'),
-     Output('networkcompare-dropdown', 'options'),
-     Output('networkcompare-dropdown', 'value')],
-    [Input('displaytype-dropdown', 'value'),
-     Input('folder-dropdown', 'value'),
-     Input('network-dropdown', 'value')]
-)
-def show_compare(view_type, selected_folder, network_select):
-    if selected_folder is None:
-        return []
-    if view_type == 'plot':
-        global NETWORK_FOLDER
-        NETWORK_FOLDER = ROOT_DIRECTORY / selected_folder
-        network_files = [f.name for f in NETWORK_FOLDER.iterdir() if f.suffix == '.h5']
-        return {'display': 'block'}, {'display': 'block'}, [{'label': net, 'value': net} for net in network_files], network_select
-    return {'display': 'none'}, {'display': 'none'}, [], network_select
-    
-
+        return [], []
+    network_folder = ROOT_DIRECTORY / selected_folder
+    network_files = [f.name for f in network_folder.iterdir() if f.suffix == '.h5']
+    dropdown_options = [{'label': net, 'value': net} for net in network_files]
+    return dropdown_options, dropdown_options
 
 
 '''     Ensures Dropdowns are Hidden when a New Folder is Selected
@@ -472,84 +564,69 @@ def change_folder(new_folder):
 
 
 
+
 '''     Adds a list of Components to the Component Dropdown when the Network is Selected
 _____________________________________________________________________________________________'''
 @app.callback(
-    Output('component-dropdown', 'options'),
-    [Input('network-dropdown', 'value'),
-     Input('folder-dropdown', 'value'),
-     Input('networkcompare-dropdown', 'value')]
+    [
+        Output('component-dropdown', 'options'),
+        Output('tableselect-dropdown', 'options'),
+        Output('component-dropdown', 'style'), 
+        Output('component-label', 'style'),
+        Output('datatype-dropdown', 'style'),
+        Output('datatype-label', 'style'),        
+        Output('tableselect-dropdown', 'style'),
+        Output('tableselect-label', 'style'),
+        Output('network-done', 'n_clicks')
+    ],
+    [
+        Input('network-done', 'n_clicks')
+    ],
+    [
+        State('network-dropdown', 'value'),
+        State('folder-dropdown', 'value')
+    ]
 )
-def load_selected_network(network_filename, network_foldername, compare_filename):
-    primary_components = set()
-    if network_filename:
-        network = loaded_network_data.load_network(network_foldername, network_filename)
-        if network:
-            primary_components = set(network.components.keys())
-    compare_components = set()
-    if compare_filename:
-        compare_network = compare_network_data.load_network(network_foldername, compare_filename)
-        if compare_network:
-            compare_components = set(compare_network.components.keys())
-    if primary_components and compare_components:
-        common_components = primary_components.intersection(compare_components)
-    else:
-        common_components = primary_components or compare_components
-    component_options = [{'label': comp, 'value': comp} for comp in common_components]
-    return component_options
+def load_selected_network(doneClick, network_filenames, network_foldername):
+    if doneClick and network_filenames:
+        commonComponents = None
+        finalNetworkList = []
+        
+        for selectedNetwork in network_filenames:
+            if selectedNetwork not in network_data.networks:
+                network_data.load_network(network_foldername, selectedNetwork)
+            eachNetwork = network_data.get_network(selectedNetwork)
+            if eachNetwork:
+                currentComponents = set(eachNetwork.components.keys())
+                if commonComponents is None:
+                    commonComponents = currentComponents
+                else:
+                    commonComponents = commonComponents.intersection(currentComponents)
+                finalNetworkList.append({'label': selectedNetwork, 'value': selectedNetwork})
+                if not commonComponents:
+                    break
+
+        finalComponentList = [{'label': comp, 'value': comp} for comp in commonComponents] if commonComponents else []
+
+        return (            
+            finalComponentList,
+            finalNetworkList,
+            visibleDropdown, visibleLabel, 
+            visibleDropdown, visibleLabel,
+            visibleDropdown, visibleLabel,
+            0
+        )
+
+    return (
+        [], [],
+        hiddenDropdown, hiddenLabel,
+        hiddenDropdown, hiddenLabel,
+        hiddenDropdown, hiddenLabel,
+        0
+    )
 
 
 
-
-
-'''     The Component Dropdown is Shown When Values are Added to it
-________________________________________________________________________'''
-@app.callback(
-    [Output('component-dropdown', 'style'), 
-     Output('component-label', 'style'),
-     Output('datatype-dropdown', 'style'),
-     Output('datatype-label', 'style')],
-    [Input('component-dropdown', 'options')]
-)
-def show_component_dropdown(component_options):
-    if component_options:
-        return {'display': 'block'}, {'display': 'block'}, {'display': 'block'}, {'display': 'block'}
-    else:
-        return {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}
-    
-
-
-
-'''     Shows or Hides Multiple Dropdowns and Sets Display to 'table' when the Data Type Dropdown is Changed
-_________________________________________________________________________________________________________________'''
-@app.callback(
-    [Output('attribute-dropdown', 'style'), 
-     Output('attribute-label', 'style'), 
-     Output('displaytype-dropdown', 'style'),
-     Output('displaytype-label', 'style'),
-     Output('displaytype-dropdown', 'value')],
-    [Input('datatype-dropdown', 'value')]
-)
-def toggle_varying_data_elements(data_type):
-    if data_type == 'varying':
-        return {'display': 'block'}, {'display': 'block'}, {'display': 'block'}, {'display': 'block'}, 'table'
-    else:
-        return {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, {'display': 'none'}, 'table'
-
-
-
-
-'''     Updates the Attribute Values when a Time Series Component is Chosen
-________________________________________________________________________________'''
-@app.callback(
-    Output('attribute-dropdown', 'options'),
-    [Input('component-dropdown', 'value'), 
-     Input('datatype-dropdown', 'value')]
-)
-def load_varying_attributes(selected_component, data_type):
-    if data_type == 'varying' and selected_component:
-        return loaded_network_data.get_varying_attributes(selected_component)
-    return []
 
 
 
@@ -569,92 +646,229 @@ def create_plot(data, x_axis_data, y_columns, title_suffix=""):
 
 
 @app.callback(
-    [Output('data-output', 'children'),
-     Output('data-graph', 'figure')],
-    [Input('network-dropdown', 'value'), 
-     Input('component-dropdown', 'value'), 
-     Input('datatype-dropdown', 'value'), 
-     Input('attribute-dropdown', 'value'), 
-     Input('displaytype-dropdown', 'value'),
-     Input('networkcompare-dropdown', 'value')]
+    [
+        Output('data-output', 'children'),
+        Output('data-graph', 'figure'),
+        Output('attribute-dropdown', 'options'),
+        Output('tableselect-dropdown', 'value'),
+        Output('plotselect-dropdown', 'value'),
+        Output('plot-done', 'n_clicks'),
+        Output('data-output', 'style'), 
+        Output('data-graph', 'style'),
+        Output('attribute-dropdown', 'style'), 
+        Output('attribute-label', 'style'),       
+        Output('plot-window-toggle', 'style'),
+        Output('plotselect-label', 'style')
+    ],
+    [       
+        Input('component-dropdown', 'value'), 
+        Input('datatype-dropdown', 'value'), 
+        Input('attribute-dropdown', 'value'),
+        Input('tableselect-dropdown', 'value'),
+        Input('plot-done', 'n_clicks')
+    ],
+    [
+        State('attribute-dropdown', 'options'),
+        State('folder-dropdown', 'value'),
+        State('tableselect-dropdown', 'value'),
+        State('plotselect-dropdown', 'value'),
+        State('data-output', 'style'), 
+        State('data-graph', 'style'),
+        State('attribute-dropdown', 'style'), 
+        State('attribute-label', 'style'),
+        State('plot-window-toggle', 'style'),
+        State('plotselect-label', 'style'),
+        State('network-dropdown', 'value')
+    ]
 )
-def display_data(network_filename, selected_component, data_type, selected_attribute, view_type, compare_filename):
-    empty_fig = go.Figure()
-    empty_fig.update_layout(
-        title="No Data Available",
-        xaxis_title="",
-        yaxis_title="",
-        template="plotly_white",
-        autosize=True
-    )
-    if not network_filename:
-        return "", empty_fig
-    if selected_component:
-        if data_type == 'static':
-            static_data = loaded_network_data.get_all_static_data(selected_component)
-            if static_data is not None:
-                return html.Pre(static_data.to_string(index=False)), empty_fig
-            return "No static data available.", empty_fig
-        elif data_type == 'varying':            
-            fig = go.Figure()
-            primary_data = loaded_network_data.get_varying_data(selected_component, selected_attribute)
-            if view_type == 'table':
-                return html.Pre(primary_data.to_string(index=False)), empty_fig
-            if view_type == 'plot':
-                if primary_data is not None and len(primary_data.columns) > 1:
-                    x_axis_data = primary_data.iloc[:, 0]
-                    y_columns = primary_data.columns[1:]
-                    for column in y_columns:
-                        fig.add_trace(go.Scatter(
-                            x=x_axis_data,
-                            y=primary_data[column],
-                            mode='lines',
-                            name=f"{column} ({network_filename})"
-                        ))
-                if compare_filename and network_filename != compare_filename:
-                    print(f"Loading comparison data for network: {compare_filename}")
-                    compare_data = compare_network_data.get_varying_data(selected_component, selected_attribute)
-                    if compare_data is not None and len(compare_data.columns) > 1:
-                        x_axis_data_compare = compare_data.iloc[:, 0]
-                        y_columns_compare = compare_data.columns[1:]
-                        for column in y_columns_compare:
+def display_data(
+        selectedComponent, dataType, selectedAttribute, 
+        tabulateNetwork, doneClick, 
+        currentAttribute, selectedFolder,
+        currentTableNetwork, currentPlotNetwork,
+        tableVis, plotVis,
+        attrDropdownVis, attrLabelVis,
+        plotWindowVisBtn, plotLabelVis,
+        allNetworks
+    ):    
+    empty_fig = go.Figure(layout={"title": "No Data Available"})
+    ctx = dash.callback_context
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+    
+    # Default output values
+    output_content = html.Div("No data available.")
+    fig = empty_fig
+    attributeOptions = currentAttribute or []
+    tableValue = currentTableNetwork
+    plotValue = []
+    if currentPlotNetwork:
+        for plots in currentPlotNetwork:
+            plotValue.append(plots)
+    networkNames = ""
+    commonAttributes = None
+    
+    # Maintain current visibility settings
+    showOutput = tableVis
+    showPlot = plotVis
+    showAttrDropdown = attrDropdownVis
+    showAttrLabel = attrLabelVis
+    showPlotWindowBtn = plotWindowVisBtn
+    showPlotLabel = plotLabelVis
+    if dataType == "varying":
+        showAttrDropdown = visibleDropdown
+        showAttrLabel = visibleLabel
+
+    if selectedComponent and selectedFolder:
+        if dataType == "varying":
+            for allNets in allNetworks:
+                
+                eachNetwork = network_data.get_network(allNets)
+                if eachNetwork:
+                    # Get varying attributes for the selected component in the current network
+                    currentAttributes = network_data.get_varying_attributes(allNets, selectedComponent)
+                    
+                    if currentAttributes is not None:
+                        if commonAttributes is None:
+                            # Initialize commonAttributes with the first network's attributes
+                            commonAttributes = set(currentAttributes)
+                        else:
+                            # Take the intersection of attributes
+                            commonAttributes = commonAttributes.intersection(currentAttributes)
+
+            # Convert common attributes to dropdown options
+            attributeOptions = [{'label': attr, 'value': attr} for attr in commonAttributes] if commonAttributes else []
+
+        if tabulateNetwork and not button_id == "plot-done":
+            network_data.load_network(selectedFolder, tabulateNetwork)
+            current_network = network_data.get_network(tabulateNetwork)
+            
+            if current_network is None:
+                output_content = html.Div("No data available for the selected network.")
+                return output_content, fig, attributeOptions, tableValue, plotValue, 0, showOutput, showPlot, showAttrDropdown, showAttrLabel, showPlotWindowBtn, showPlotLabel
+            
+            tableValue = tabulateNetwork
+            showOutput = visible
+            showPlot = hiddenPlot
+            
+            if dataType == "static":
+                showAttrDropdown = hiddenDropdown
+                showAttrLabel = hiddenLabel
+                staticComponentData = network_data.get_all_static_data(tabulateNetwork, selectedComponent)
+                if staticComponentData is not None:
+                    output_content = dash_table.DataTable(
+                        data=staticComponentData.to_dict('records'),
+                        columns=[{"name": i, "id": i} for i in staticComponentData.columns],
+                        page_size=10,
+                        style_table={'overflowX': 'auto'},
+                        style_cell={'textAlign': 'left'},
+                        style_header={'backgroundColor': 'lightgrey', 'fontWeight': 'bold'}
+                    )
+                else:
+                    output_content = html.Div(f"No static data available for {tabulateNetwork} / {selectedComponent}.")
+            
+            elif dataType == "varying":         
+                showPlotLabel = visibleLabel
+                showPlotWindowBtn = visibleButton            
+                output_content = html.Div("Select an attribute to view varying data.")
+                
+                if selectedAttribute:                    
+                    varyingComponentData = network_data.get_varying_data(tabulateNetwork, selectedComponent, selectedAttribute)
+                    if varyingComponentData is not None:
+                        output_content = dash_table.DataTable(
+                            data=varyingComponentData.to_dict('records'),
+                            columns=[{"name": i, "id": i} for i in varyingComponentData.columns],
+                            page_size=10,
+                            style_table={'overflowX': 'auto'},
+                            style_cell={'textAlign': 'left'},
+                            style_header={'backgroundColor': 'lightgrey', 'fontWeight': 'bold'}
+                        )
+        elif dataType == "varying" and selectedAttribute:            
+            showPlotLabel = visibleLabel
+            showPlotWindowBtn = visibleButton
+            if button_id == "plot-done" and len(plotValue) > 0:
+                tableValue = None
+                showPlot = visiblePlot
+                showOutput = hidden
+                for network in plotValue:
+                    network_data.load_network(selectedFolder, network)
+                    varyingComponentData = network_data.get_varying_data(network, selectedComponent, selectedAttribute)
+                    if networkNames:
+                        networkNames += f", '{network}'"
+                    else:
+                        networkNames += f"'{network}'"
+                                        
+                    if varyingComponentData is not None:                        
+                        x_axis_data = varyingComponentData.iloc[:, 0]
+                        y_columns = varyingComponentData.columns[1:]
+                        for column in y_columns:
                             fig.add_trace(go.Scatter(
-                                x=x_axis_data_compare,
-                                y=compare_data[column],
+                                x=x_axis_data,
+                                y=varyingComponentData[column],
                                 mode='lines',
-                                name=f"{column} ({compare_filename})"
+                                name=f"{column} ({network})"
                             ))
-                if not fig.data:
-                    return "No data available for the selected component and attribute.", empty_fig
-                fig.update_layout(
-                    title=f"Comparison of {selected_component} Data",
-                    xaxis_title="Date",
-                    yaxis_title="Values",
-                    template="plotly_white",
-                    autosize=True
-                )
-                return html.Div(), fig
-    return "", empty_fig
+                    else:
+                        showOutput = visible
+                        output_content = html.Div("Error plotting. Network is empty.")
+                fig.update_layout(title={"text": f"Comparing Attribute: ['{selectedAttribute}'] for Network/s: [{networkNames}]"})
+
+    return (
+        output_content, fig, attributeOptions, tableValue, plotValue, 0,
+        showOutput, showPlot, showAttrDropdown, showAttrLabel, showPlotWindowBtn, showPlotLabel
+    )
 
 
-'''     Hide and Show the Plot or Table (not shown at the same time)
-__________________________________________________________________________'''
+
+'''     Shows or Hides Multiple Dropdowns when the Data Type Dropdown is Changed
+_________________________________________________________________________________________________________________'''
+
+
 @app.callback(
-    [Output('data-output', 'style'), 
-     Output('data-graph', 'style')],
-    [Input('displaytype-dropdown', 'value'),
-     Input('datatype-dropdown', 'value'),
-     Input('attribute-dropdown', 'value')]
+    [
+        Output("hiddenNetworkWindow", "data"),
+        Output("hiddenPlotWindow", "data")
+    ],
+    [
+        Input("network-window-toggle", "n_clicks"),
+        Input("network-done", "n_clicks"),
+
+        Input("plot-window-toggle", "n_clicks"),
+        Input("plot-done", "n_clicks")
+    ],
+    [
+        State("hiddenNetworkWindow", "data"),
+        State("hiddenPlotWindow", "data")
+    ], prevent_initial_call=True
 )
-def show_component_dropdown(display_select, datatype_select, attribute_select):
-    if datatype_select == "varying" and not attribute_select:
-            return {'display': 'none'}, {'display': 'none', 'width': '0%', 'height': '0%', 'margin-top': '20px'}
-    if display_select == "table":        
-        return {'display': 'block'}, {'display': 'none', 'width': '0%', 'height': '0%', 'margin-top': '20px'}
-    elif display_select == "plot":
-        return {'display': 'none'}, {'display': 'block', 'width': '100%', 'height': '100%', 'margin-top': '20px'}
-    else:
-        return {'display': 'none'}, {'display': 'none'}
+def toggle_network_dropdown(toggleNetwork, doneNetwork, togglePlot, donePlot, network_window, plot_window):
+    ctx = dash.callback_context
+    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    if button_id == "network-window-toggle":
+        network_window['is_hidden'] = not network_window['is_hidden']
+    elif button_id == "network-done":
+        network_window['is_hidden'] = True
+    if button_id == "plot-window-toggle":
+        plot_window['is_hidden'] = not plot_window['is_hidden']
+    elif button_id == "plot-done":
+        plot_window['is_hidden'] = True
+
+    return network_window, plot_window
+
+@app.callback(
+    Output("network-window", "style"),
+    Input("hiddenNetworkWindow", "data")
+)
+def update_network_window_visibility(hidden_state):
+    return hiddenCheckbox if hidden_state['is_hidden'] else visibleCheckbox
+
+@app.callback(
+    Output("plot-window", "style"),
+    Input("hiddenPlotWindow", "data")
+)
+def update_plot_window_visibility(hidden_state):
+    return hiddenCheckbox if hidden_state['is_hidden'] else visibleCheckbox
+
     
 
 
